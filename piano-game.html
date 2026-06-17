@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>别踩白块 · 钢琴挑战</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: #0d0d0d;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    min-height: 100dvh;
+    font-family: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', sans-serif;
+    overflow: hidden;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+  }
+
+  .game-wrapper {
+    position: relative;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+  }
+
+  canvas {
+    display: block;
+    border-radius: 12px;
+    box-shadow:
+      0 0 0 4px #2a2a2a,
+      0 0 0 8px #1a1a1a,
+      0 0 80px rgba(255, 215, 0, 0.08),
+      0 0 40px rgba(255, 255, 255, 0.03);
+    cursor: pointer;
+    image-rendering: auto;
+  }
+
+  .mute-btn {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    width: 44px;
+    height: 44px;
+    border: 2px solid rgba(255,255,255,0.3);
+    border-radius: 50%;
+    background: rgba(0,0,0,0.4);
+    color: #fff;
+    font-size: 20px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    transition: all 0.25s;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
+  .mute-btn:hover { border-color: rgba(255,255,255,0.6); background: rgba(0,0,0,0.6); }
+  .mute-btn:active { transform: scale(0.9); }
+
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    10% { transform: translateX(-6px); }
+    20% { transform: translateX(6px); }
+    30% { transform: translateX(-5px); }
+    40% { transform: translateX(5px); }
+    50% { transform: translateX(-4px); }
+    60% { transform: translateX(4px); }
+    70% { transform: translateX(-2px); }
+    80% { transform: translateX(2px); }
+    90% { transform: translateX(-1px); }
+  }
+  .shaking { animation: shake 0.5s ease-out; }
+</style>
+</head>
+<body>
+<div class="game-wrapper" id="wrapper">
+  <canvas id="gameCanvas"></canvas>
+  <button class="mute-btn" id="muteBtn" title="音效">🔊</button>
+</div>
+
+<script>
+(function() {
+  // ==================== CONSTANTS ====================
+  const CANVAS_W = 400;
+  const CANVAS_H = 700;
+  const COLS = 4;
+  const ROW_H = 112;
+  const COL_W = CANVAS_W / COLS;
+  const INITIAL_SPEED = 1.8;
+  const SPEED_INCREMENT = 0.18;
+  const SCORE_PER_SPEED_UP = 8;
+  const COMBO_WINDOW = 650;
+  const MAX_PARTICLES = 60;
+
+  // ==================== DOM ====================
+  const canvas = document.getElementById('gameCanvas');
+  const ctx = canvas.getContext('2d');
+  const wrapper = document.getElementById('wrapper');
+  const muteBtn = document.getElementById('muteBtn');
+  canvas.width = CANVAS_W;
+  canvas.height = CANVAS_H;
+
+  // ==================== STATE ====================
+  let state = 'IDLE';        // IDLE | PLAYING | OVER
+  let rows = [];
+  let score = 0;
+  let bestScore = parseInt(localStorage.getItem('piano_best') || '0');
+  let speed = INITIAL_SPEED;
+  let combo = 0;
+  let maxCombo = 0;
+  let lastTapTime = 0;
+  let particles = [];
+  let floatingTexts = [];
+  let gameOverTime = 0;
+  let idleTime = 0;
+  let graceFrames = 0;
+  let muted = false;
+  let isPressed = false;
+  let animFrameId = null;
+  let lastFrameTime = 0;
+  let shakeAmount = 0;
+  let newRecord = false;
+
+  // ==================== AUDIO ====================
+  let audioCtx = null;
+  function initAudio() {
+    if (!audioCtx) {
+      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e) {}
+    }
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+  }
+
+  function playTone(freq, dur, type, vol, slideTo) {
+    if (!audioCtx || muted) return;
+    try {
+      const t = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type || 'sine';
+      osc.frequency.setValueAtTime(freq, t);
+      if (slideTo) osc.frequency.linearRampToValueAtTime(slideTo, t + dur);
+      gain.gain.setValueAtTime((vol || 0.25), t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + dur);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(t);
+      osc.stop(t + dur);
+    } catch(e) {}
+  }
+
+  function sfxTap() {
+    const baseFreq = 660 + combo * 55;
+    playTone(baseFreq, 0.06, 'square', 0.18);
+    playTone(baseFreq * 1.5, 0.04, 'sine', 0.1);
+  }
+
+  function sfxFail() {
+    playTone(160, 0.35, 'sawtooth', 0.3, 60);
+  }
+
+  function sfxNewRecord() {
+    playTone(523, 0.1, 'sine', 0.25);
+    setTimeout(() => playTone(659, 0.1, 'sine', 0.25), 100);
+    setTimeout(() => playTone(784, 0.15, 'sine', 0.3), 200);
+  }
+
+  // ==================== RESIZE ====================
+  function resize() {
+    const maxW = Math.min(window.innerWidth * 0.94, 440);
+    const maxH = Math.min(window.innerHeight * 0.82, 770);
+    const scale = Math.min(maxW / CANVAS_W, maxH / CANVAS_H);
+    canvas.style.width  = (CANVAS_W * scale) + 'px';
+    canvas.style.height = (CANVAS_H * scale) + 'px';
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // ==================== COORDINATE HELPER ====================
+  function toLogical(clientX, clientY) {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: (clientX - r.left) * (CANVAS_W / r.width),
+      y: (clientY - r.top)  * (CANVAS_H / r.height)
+    };
+  }
+
+  // ==================== ROW SPAWN ====================
+  function randomBlackCol() { return Math.floor(Math.random() * COLS); }
+
+  function spawnRow(y) {
+    return { y: y, blackCol: randomBlackCol(), clicked: false };
+  }
+
+  function initRows() {
+    rows = [];
+    for (let y = -ROW_H; y < CANVAS_H; y += ROW_H) {
+      rows.push(spawnRow(y));
+    }
+  }
+
+  function spawnNewRows() {
+    while (rows.length === 0 || rows[0].y > 0) {
+      const newY = rows.length === 0 ? 0 : rows[0].y - ROW_H;
+      rows.unshift(spawnRow(newY));
+    }
+  }
+
+  // ==================== PARTICLES ====================
+  function burstParticles(cx, cy, count) {
+    const colors = ['#f6c90e','#ff6b6b','#48dbfb','#a29bfe','#55efc4','#fd79a8','#ffeaa7'];
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist  = 40 + Math.random() * 80;
+      particles.push({
+        x: cx, y: cy,
+        vx: Math.cos(angle) * dist,
+        vy: Math.sin(angle) * dist - 30,
+        life: 1,
+        decay: 0.015 + Math.random() * 0.03,
+        size: 2.5 + Math.random() * 5,
+        color: colors[Math.floor(Math.random() * colors.length)]
+      });
+    }
+    if (particles.length > MAX_PARTICLES) particles.splice(0, particles.length - MAX_PARTICLES);
+  }
+
+  function updateParticles(dt) {
+    const d = dt || 1;
+    for (let i = particles.length - 1; i >= 0; i--) {
+      const p = particles[i];
+      p.x += p.vx * d * 0.016;
+      p.y += p.vy * d * 0.016;
+      p.vy += 120 * d * 0.016;
+      p.life -= p.decay * d;
+      if (p.life <= 0) particles.splice(i, 1);
+    }
+  }
+
+  // ==================== FLOATING TEXTS ====================
+  function addFloatingText(x, y, text, color, size) {
+    floatingTexts.push({ x, y, text, color, size: size || 22, life: 1, decay: 0.025 });
+    if (floatingTexts.length > 15) floatingTexts.shift();
+  }
+
+  function updateFloatingTexts(dt) {
+    const d = dt || 1;
+    for (let i = floatingTexts.length - 1; i >= 0; i--) {
+      const f = floatingTexts[i];
+      f.y -= 1.5 * d;
+      f.life -= f.decay * d;
+      if (f.life <= 0) floatingTexts.splice(i, 1);
+    }
+  }
+
+  // ==================== INPUT ====================
+  function handleTap(logicalX, logicalY) {
+    if (state !== 'PLAYING') return;
+
+    const col = Math.floor(logicalX / COL_W);
+    if (col < 0 || col >= COLS) return;
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (logicalY >= row.y && logicalY < row.y + ROW_H) {
+        if (row.clicked) return;
+
+        if (row.blackCol === col) {
+          // --- HIT! ---
+          row.clicked = true;
+          score++;
+
+          const cx = col * COL_W + COL_W / 2;
+          const cy = row.y + ROW_H / 2;
+          burstParticles(cx, cy, 10);
+          addFloatingText(cx, cy - 10, '+1', '#f6c90e', 24);
+
+          const now = performance.now();
+          if (now - lastTapTime < COMBO_WINDOW) {
+            combo++;
+          } else {
+            combo = 1;
+          }
+          lastTapTime = now;
+          if (combo > maxCombo) maxCombo = combo;
+
+          if (combo > 1) {
+            addFloatingText(cx, cy - 35, 'x' + combo,
+              combo >= 10 ? '#ff6b6b' : combo >= 5 ? '#f6c90e' : '#48dbfb',
+              18 + combo * 2);
+          }
+
+          sfxTap();
+
+          // speed up
+          if (score % SCORE_PER_SPEED_UP === 0) {
+            speed += SPEED_INCREMENT;
+            addFloatingText(CANVAS_W / 2, CANVAS_H / 2, '加速!', '#ff6b6b', 30);
+          }
+
+          return;
+        } else {
+          // --- MISS (white tile) ---
+          shakeAmount = 12;
+          sfxFail();
+          endGame();
+          return;
+        }
+      }
+    }
+  }
+
+  canvas.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    isPressed = true;
+    const pos = toLogical(e.clientX, e.clientY);
+    handleTap(pos.x, pos.y);
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (!isPressed) return;
+    const pos = toLogical(e.clientX, e.clientY);
+    handleTap(pos.x, pos.y);
+  });
+
+  window.addEventListener('mouseup', () => { isPressed = false; });
+  window.addEventListener('mouseleave', () => { isPressed = false; });
+
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    isPressed = true;
+    const t = e.touches[0];
+    const pos = toLogical(t.clientX, t.clientY);
+    handleTap(pos.x, pos.y);
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (!isPressed) return;
+    const t = e.touches[0];
+    const pos = toLogical(t.clientX, t.clientY);
+    handleTap(pos.x, pos.y);
+  }, { passive: false });
+
+  canvas.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    isPressed = false;
+  });
+
+  canvas.addEventListener('touchcancel', () => { isPressed = false; });
+
+  // --- Click for idle/over states (button detection) ---
+  canvas.addEventListener('click', (e) => {
+    const pos = toLogical(e.clientX, e.clientY);
+    if (state === 'IDLE') {
+      // Start button area
+      const bx = CANVAS_W / 2 - 90;
+      const by = CANVAS_H / 2 + 40;
+      const bw = 180;
+      const bh = 56;
+      if (pos.x >= bx && pos.x <= bx + bw && pos.y >= by && pos.y <= by + bh) {
+        startGame();
+      }
+    } else if (state === 'OVER') {
+      // Prevent accidental restart for 1.2 seconds after game over
+      if (performance.now() - gameOverTime < 1200) return;
+      const bx = CANVAS_W / 2 - 90;
+      const by = CANVAS_H / 2 + 110;
+      const bw = 180;
+      const bh = 56;
+      if (pos.x >= bx && pos.x <= bx + bw && pos.y >= by && pos.y <= by + bh) {
+        startGame();
+      }
+    }
+  });
+
+  // ==================== MUTE ====================
+  muteBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    muted = !muted;
+    muteBtn.textContent = muted ? '🔇' : '🔊';
+  });
+
+  // ==================== GAME FLOW ====================
+  function startGame() {
+    initAudio();
+    state = 'PLAYING';
+    score = 0;
+    speed = INITIAL_SPEED;
+    combo = 0;
+    maxCombo = 0;
+    lastTapTime = 0;
+    particles = [];
+    floatingTexts = [];
+    shakeAmount = 0;
+    newRecord = false;
+    graceFrames = 100;
+    initRows();
+  }
+
+  function endGame() {
+    state = 'OVER';
+    gameOverTime = performance.now();
+    newRecord = score > bestScore;
+    if (newRecord) {
+      bestScore = score;
+      localStorage.setItem('piano_best', bestScore.toString());
+      sfxNewRecord();
+    }
+  }
+
+  // ==================== RENDER ====================
+  function drawRoundedRect(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+  }
+
+  function renderIdle() {
+    // Background
+    const bgGrad = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
+    bgGrad.addColorStop(0, '#1a1a2e');
+    bgGrad.addColorStop(0.5, '#16213e');
+    bgGrad.addColorStop(1, '#0f3460');
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    // Decorative floating notes
+    const t = idleTime * 0.001;
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    for (let i = 0; i < 6; i++) {
+      const nx = 50 + ((i * 67 + t * 20) % (CANVAS_W + 50)) - 25;
+      const ny = 100 + Math.sin(t * 0.8 + i * 1.2) * 180;
+      ctx.font = '40px serif';
+      ctx.fillText('♪', nx, ny);
+    }
+
+    // Piano keys decoration at bottom
+    for (let c = 0; c < COLS; c++) {
+      const kx = c * COL_W;
+      ctx.fillStyle = c === 1 || c === 2 ? '#1a1a1a' : '#f5f0e8';
+      ctx.fillRect(kx + 3, CANVAS_H - 80, COL_W - 6, 60);
+      ctx.strokeStyle = '#444';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(kx + 3, CANVAS_H - 80, COL_W - 6, 60);
+    }
+    for (let c = 0; c < COLS; c++) {
+      if (c === 0 || c === 2 || c === 3) {
+        const kx = c * COL_W + COL_W * 0.5;
+        ctx.fillStyle = '#0d0d0d';
+        ctx.fillRect(kx - 13, CANVAS_H - 80, 26, 38);
+      }
+    }
+
+    // Title
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 52px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.textAlign = 'center';
+    ctx.shadowColor = 'rgba(246,201,14,0.5)';
+    ctx.shadowBlur = 30;
+    ctx.fillText('别踩白块', CANVAS_W / 2, 140);
+    ctx.shadowBlur = 0;
+
+    // Subtitle
+    ctx.fillStyle = '#f6c90e';
+    ctx.font = '20px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillText('钢 琴 挑 战', CANVAS_W / 2, 185);
+
+    // Best score
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.font = '16px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillText('最高纪录: ' + bestScore, CANVAS_W / 2, 240);
+
+    // How to play
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = '14px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillText('点击黑块  避开白块', CANVAS_W / 2, 280);
+    ctx.fillText('按住滑动可连续操作', CANVAS_W / 2, 305);
+
+    // Start button
+    const bx = CANVAS_W / 2 - 90;
+    const by = CANVAS_H / 2 + 40;
+    const pulse = 1 + Math.sin(t * 0.004) * 0.04;
+    ctx.save();
+    ctx.translate(CANVAS_W / 2, by + 28);
+    ctx.scale(pulse, pulse);
+    ctx.translate(-CANVAS_W / 2, -(by + 28));
+
+    const btnGrad = ctx.createLinearGradient(bx, by, bx, by + 56);
+    btnGrad.addColorStop(0, '#f6c90e');
+    btnGrad.addColorStop(1, '#e0a800');
+    ctx.fillStyle = btnGrad;
+    drawRoundedRect(bx, by, 180, 56, 28);
+    ctx.fill();
+
+    ctx.shadowColor = 'rgba(246,201,14,0.4)';
+    ctx.shadowBlur = 20;
+    ctx.fillStyle = btnGrad;
+    drawRoundedRect(bx, by, 180, 56, 28);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = '#1a1a2e';
+    ctx.font = 'bold 22px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillText('开始挑战', CANVAS_W / 2, by + 38);
+    ctx.restore();
+  }
+
+  function renderPlaying() {
+    // White background
+    ctx.fillStyle = '#fafaf7';
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    // Column separators
+    ctx.strokeStyle = '#e0dcd5';
+    ctx.lineWidth = 1;
+    for (let c = 1; c < COLS; c++) {
+      ctx.beginPath();
+      ctx.moveTo(c * COL_W, 0);
+      ctx.lineTo(c * COL_W, CANVAS_H);
+      ctx.stroke();
+    }
+
+    // Draw rows
+    for (const row of rows) {
+      // Only draw visible rows
+      if (row.y + ROW_H < 0 || row.y > CANVAS_H) continue;
+
+      // Row separator line
+      const sepY = row.y + ROW_H;
+      if (sepY > 0 && sepY < CANVAS_H) {
+        ctx.strokeStyle = '#d5d0c8';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(0, sepY);
+        ctx.lineTo(CANVAS_W, sepY);
+        ctx.stroke();
+      }
+
+      // Black tile
+      if (row.y + ROW_H > 0 && row.y < CANVAS_H) {
+        const bx = row.blackCol * COL_W + 2;
+        const by = row.y + 2;
+        const bw = COL_W - 4;
+        const bh = ROW_H - 4;
+
+        if (row.clicked) {
+          // Clicked -> grey
+          const gVal = 160 + Math.sin(performance.now() * 0.01) * 10;
+          ctx.fillStyle = `rgb(${gVal},${gVal},${gVal})`;
+        } else {
+          // Active black tile
+          const tileGrad = ctx.createLinearGradient(bx, by, bx + bw, by + bh);
+          tileGrad.addColorStop(0, '#1a1a1a');
+          tileGrad.addColorStop(0.6, '#0d0d0d');
+          tileGrad.addColorStop(1, '#1a1a1a');
+          ctx.fillStyle = tileGrad;
+        }
+
+        drawRoundedRect(bx, by, bw, bh, 6);
+        ctx.fill();
+
+        // Glossy highlight
+        if (!row.clicked) {
+          ctx.fillStyle = 'rgba(255,255,255,0.04)';
+          drawRoundedRect(bx + 3, by + 3, bw - 6, bh * 0.45, 4);
+          ctx.fill();
+        }
+      }
+    }
+
+    // Danger indicator: flash red when black tile near bottom
+    for (const row of rows) {
+      if (!row.clicked && row.y + ROW_H > CANVAS_H - 30 && row.y < CANVAS_H) {
+        const alpha = Math.abs(Math.sin(performance.now() * 0.015)) * 0.3;
+        ctx.fillStyle = `rgba(255,50,50,${alpha})`;
+        ctx.fillRect(row.blackCol * COL_W, row.y, COL_W, ROW_H);
+      }
+    }
+
+    // Particles
+    for (const p of particles) {
+      ctx.globalAlpha = p.life;
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Floating texts
+    for (const f of floatingTexts) {
+      ctx.globalAlpha = f.life;
+      ctx.fillStyle = f.color;
+      ctx.font = `bold ${f.size}px "PingFang SC","Microsoft YaHei",sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText(f.text, f.x, f.y);
+    }
+    ctx.globalAlpha = 1;
+    ctx.textAlign = 'start';
+
+    // HUD - Score
+    ctx.fillStyle = '#333';
+    ctx.font = 'bold 26px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.textAlign = 'right';
+    ctx.fillText(score, CANVAS_W - 24, 40);
+
+    // HUD - Best
+    ctx.fillStyle = '#999';
+    ctx.font = '13px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillText('最佳 ' + bestScore, CANVAS_W - 24, 62);
+    ctx.textAlign = 'start';
+
+    // Combo display
+    if (combo >= 3) {
+      const alpha = Math.min(1, (performance.now() - lastTapTime) / 400);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = combo >= 10 ? '#ff4444' : combo >= 6 ? '#f6c90e' : '#48dbfb';
+      ctx.font = `bold ${28 + combo * 1.5}px "PingFang SC","Microsoft YaHei",sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText('COMBO x' + combo, CANVAS_W / 2, 100);
+      ctx.textAlign = 'start';
+      ctx.globalAlpha = 1;
+    }
+
+    // Speed indicator
+    const speedLevel = Math.floor((speed - INITIAL_SPEED) / SPEED_INCREMENT) + 1;
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.font = '11px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.fillText('Lv.' + speedLevel, 20, 40);
+  }
+
+  function renderOver() {
+    // Dark overlay
+    const elapsed = (performance.now() - gameOverTime) / 1000;
+    const alpha = Math.min(0.85, elapsed * 2);
+    ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+    ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+
+    // Game Over text
+    const bounceScale = Math.min(1, elapsed * 3);
+    const easedScale = bounceScale < 1
+      ? 1 - Math.pow(1 - bounceScale, 3)
+      : 1 + Math.sin((bounceScale - 1) * Math.PI * 2) * 0.05 * Math.max(0, 1 - (bounceScale - 1) * 2);
+
+    ctx.save();
+    ctx.translate(CANVAS_W / 2, 180);
+    ctx.scale(easedScale, easedScale);
+    ctx.translate(-CANVAS_W / 2, -180);
+
+    ctx.fillStyle = '#ff4444';
+    ctx.font = 'bold 44px "PingFang SC","Microsoft YaHei",sans-serif';
+    ctx.textAlign = 'center';
+    ctx.shadowColor = 'rgba(255,50,50,0.5)';
+    ctx.shadowBlur = 25;
+    ctx.fillText('游戏结束', CANVAS_W / 2, 180);
+    ctx.shadowBlur = 0;
+
+    ctx.restore();
+
+    // Score
+    if (elapsed > 0.3) {
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 72px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(score, CANVAS_W / 2, 290);
+    }
+
+    // Score label
+    if (elapsed > 0.5) {
+      ctx.fillStyle = 'rgba(255,255,255,0.6)';
+      ctx.font = '18px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillText('得  分', CANVAS_W / 2, 325);
+    }
+
+    // New record
+    if (newRecord && elapsed > 0.7) {
+      ctx.fillStyle = '#f6c90e';
+      ctx.font = 'bold 20px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.shadowColor = 'rgba(246,201,14,0.6)';
+      ctx.shadowBlur = 15;
+      ctx.fillText('🏆 新纪录！', CANVAS_W / 2, 365);
+      ctx.shadowBlur = 0;
+    }
+
+    // Best
+    if (elapsed > 0.9) {
+      ctx.fillStyle = 'rgba(255,255,255,0.5)';
+      ctx.font = '15px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillText('最高纪录: ' + bestScore, CANVAS_W / 2, 395);
+      ctx.fillText('最大连击: ' + maxCombo, CANVAS_W / 2, 420);
+    }
+
+    // Restart button
+    if (elapsed > 1.0) {
+      const bx = CANVAS_W / 2 - 90;
+      const by = CANVAS_H / 2 + 110;
+      const btnGrad = ctx.createLinearGradient(bx, by, bx, by + 56);
+      btnGrad.addColorStop(0, '#f6c90e');
+      btnGrad.addColorStop(1, '#e0a800');
+      ctx.fillStyle = btnGrad;
+      drawRoundedRect(bx, by, 180, 56, 28);
+      ctx.fill();
+      ctx.fillStyle = '#1a1a2e';
+      ctx.font = 'bold 20px "PingFang SC","Microsoft YaHei",sans-serif';
+      ctx.fillText('再来一局', CANVAS_W / 2, by + 37);
+    }
+
+    ctx.textAlign = 'start';
+  }
+
+  // ==================== GAME LOOP ====================
+  function update(dt) {
+    if (state === 'PLAYING') {
+      // Move rows
+      for (const row of rows) {
+        row.y += speed * dt;
+      }
+
+      // Spawn new rows
+      spawnNewRows();
+
+      // Check game over (skip during grace period)
+      if (graceFrames > 0) {
+        graceFrames--;
+      } else {
+        for (const row of rows) {
+          if (!row.clicked && row.y + ROW_H > CANVAS_H + 2) {
+            shakeAmount = 10;
+            sfxFail();
+            endGame();
+            break;
+          }
+        }
+      }
+
+      // Remove off-screen rows
+      while (rows.length > 0 && rows[rows.length - 1].y > CANVAS_H) {
+        rows.pop();
+      }
+
+      // Update particles
+      updateParticles(dt);
+      updateFloatingTexts(dt);
+
+      // Decay shake
+      if (shakeAmount > 0 && state !== 'OVER') {
+        shakeAmount *= 0.85;
+        if (shakeAmount < 0.3) shakeAmount = 0;
+      }
+    }
+
+    if (state === 'OVER') {
+      updateParticles(dt);
+      updateFloatingTexts(dt);
+      if (shakeAmount > 0) {
+        shakeAmount *= 0.88;
+        if (shakeAmount < 0.2) shakeAmount = 0;
+      }
+    }
+
+    if (state === 'IDLE') {
+      idleTime += dt * 1000;
+    }
+  }
+
+  function render() {
+    ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+
+    // Apply shake
+    let sx = 0, sy = 0;
+    if (shakeAmount > 0.1) {
+      sx = (Math.random() - 0.5) * shakeAmount * 2;
+      sy = (Math.random() - 0.5) * shakeAmount * 2;
+      ctx.save();
+      ctx.translate(sx, sy);
+    }
+
+    if (state === 'IDLE') {
+      renderIdle();
+    } else if (state === 'PLAYING') {
+      renderPlaying();
+    } else if (state === 'OVER') {
+      // Draw playing state underneath
+      renderPlaying();
+      renderOver();
+    }
+
+    if (shakeAmount > 0.1) {
+      ctx.restore();
+    }
+  }
+
+  function gameLoop(timestamp) {
+    if (!lastFrameTime) lastFrameTime = timestamp;
+    let dt = (timestamp - lastFrameTime) / 16.667; // normalize to 60fps
+    if (dt > 3) dt = 3; // cap to prevent huge jumps
+    lastFrameTime = timestamp;
+
+    update(dt);
+    render();
+
+    animFrameId = requestAnimationFrame(gameLoop);
+  }
+
+  // ==================== INIT ====================
+  initRows(); // prepare for preview
+  lastFrameTime = performance.now();
+  animFrameId = requestAnimationFrame(gameLoop);
+
+  // Handle visibility change to prevent timing issues
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      lastFrameTime = 0;
+    }
+  });
+
+})();
+</script>
+</body>
+</html>
