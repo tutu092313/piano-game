@@ -282,6 +282,31 @@
 
   // ==================== INPUT ====================
   function handleTap(logicalX, logicalY) {
+    if (state === 'IDLE') {
+      // Start button area
+      const bx = CANVAS_W / 2 - 90;
+      const by = CANVAS_H / 2 + 40;
+      const bw = 180;
+      const bh = 56;
+      if (logicalX >= bx && logicalX <= bx + bw && logicalY >= by && logicalY <= by + bh) {
+        startGame();
+      }
+      return;
+    }
+
+    if (state === 'OVER') {
+      // Prevent accidental restart for 1.2 seconds after game over
+      if (performance.now() - gameOverTime < 1200) return;
+      const bx = CANVAS_W / 2 - 90;
+      const by = CANVAS_H / 2 + 110;
+      const bw = 180;
+      const bh = 56;
+      if (logicalX >= bx && logicalX <= bx + bw && logicalY >= by && logicalY <= by + bh) {
+        startGame();
+      }
+      return;
+    }
+
     if (state !== 'PLAYING') return;
 
     const col = Math.floor(logicalX / COL_W);
@@ -375,31 +400,6 @@
   });
 
   canvas.addEventListener('touchcancel', () => { isPressed = false; });
-
-  // --- Click for idle/over states (button detection) ---
-  canvas.addEventListener('click', (e) => {
-    const pos = toLogical(e.clientX, e.clientY);
-    if (state === 'IDLE') {
-      // Start button area
-      const bx = CANVAS_W / 2 - 90;
-      const by = CANVAS_H / 2 + 40;
-      const bw = 180;
-      const bh = 56;
-      if (pos.x >= bx && pos.x <= bx + bw && pos.y >= by && pos.y <= by + bh) {
-        startGame();
-      }
-    } else if (state === 'OVER') {
-      // Prevent accidental restart for 1.2 seconds after game over
-      if (performance.now() - gameOverTime < 1200) return;
-      const bx = CANVAS_W / 2 - 90;
-      const by = CANVAS_H / 2 + 110;
-      const bw = 180;
-      const bh = 56;
-      if (pos.x >= bx && pos.x <= bx + bw && pos.y >= by && pos.y <= by + bh) {
-        startGame();
-      }
-    }
-  });
 
   // ==================== MUTE ====================
   muteBtn.addEventListener('click', (e) => {
