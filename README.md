@@ -27,7 +27,7 @@
 
 1. Fork 本仓库
 2. Settings → Pages → Source 选择 `main` 分支
-3. 访问 `https://你的用户名.github.io/dont-tap-white/`
+3. 访问 `https://你的用户名.github.io/piano-game/`
 
 ## 🛠 技术栈
 
