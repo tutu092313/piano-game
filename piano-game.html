@@ -40,6 +40,8 @@
       0 0 40px rgba(255, 255, 255, 0.03);
     cursor: pointer;
     image-rendering: auto;
+    will-change: transform;
+    contain: layout style paint;
   }
 
   .mute-btn {
@@ -129,6 +131,9 @@
   let shakeAmount = 0;
   let newRecord = false;
 
+  // ==================== CACHED TRANSFORM (avoid getBoundingClientRect per event) ====================
+  let txScaleX = 1, txScaleY = 1, txOffX = 0, txOffY = 0;
+
   // ==================== AUDIO ====================
   let audioCtx = null;
   function initAudio() {
@@ -172,6 +177,16 @@
     setTimeout(() => playTone(784, 0.15, 'sine', 0.3), 200);
   }
 
+  // ==================== PRECOMPUTED GRADIENTS ====================
+  let cachedBgGrad = null;
+
+  function buildCachedGradients() {
+    cachedBgGrad = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
+    cachedBgGrad.addColorStop(0, '#1a1a2e');
+    cachedBgGrad.addColorStop(0.5, '#16213e');
+    cachedBgGrad.addColorStop(1, '#0f3460');
+  }
+
   // ==================== RESIZE ====================
   function resize() {
     const maxW = Math.min(window.innerWidth * 0.94, 440);
@@ -179,16 +194,21 @@
     const scale = Math.min(maxW / CANVAS_W, maxH / CANVAS_H);
     canvas.style.width  = (CANVAS_W * scale) + 'px';
     canvas.style.height = (CANVAS_H * scale) + 'px';
+    // Cache transform params — avoid getBoundingClientRect() on every input event
+    const r = canvas.getBoundingClientRect();
+    txScaleX = CANVAS_W / r.width;
+    txScaleY = CANVAS_H / r.height;
+    txOffX = r.left;
+    txOffY = r.top;
   }
   window.addEventListener('resize', resize);
   resize();
 
   // ==================== COORDINATE HELPER ====================
   function toLogical(clientX, clientY) {
-    const r = canvas.getBoundingClientRect();
     return {
-      x: (clientX - r.left) * (CANVAS_W / r.width),
-      y: (clientY - r.top)  * (CANVAS_H / r.height)
+      x: (clientX - txOffX) * txScaleX,
+      y: (clientY - txOffY) * txScaleY
     };
   }
 
@@ -431,13 +451,9 @@
     ctx.closePath();
   }
 
-  function renderIdle() {
-    // Background
-    const bgGrad = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
-    bgGrad.addColorStop(0, '#1a1a2e');
-    bgGrad.addColorStop(0.5, '#16213e');
-    bgGrad.addColorStop(1, '#0f3460');
-    ctx.fillStyle = bgGrad;
+  function renderIdle(now) {
+    // Background — use cached gradient
+    ctx.fillStyle = cachedBgGrad;
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
     // Decorative floating notes
@@ -501,16 +517,13 @@
     ctx.scale(pulse, pulse);
     ctx.translate(-CANVAS_W / 2, -(by + 28));
 
-    const btnGrad = ctx.createLinearGradient(bx, by, bx, by + 56);
-    btnGrad.addColorStop(0, '#f6c90e');
-    btnGrad.addColorStop(1, '#e0a800');
-    ctx.fillStyle = btnGrad;
+    ctx.fillStyle = '#f6c90e';
     drawRoundedRect(bx, by, 180, 56, 28);
     ctx.fill();
 
     ctx.shadowColor = 'rgba(246,201,14,0.4)';
     ctx.shadowBlur = 20;
-    ctx.fillStyle = btnGrad;
+    ctx.fillStyle = '#f6c90e';
     drawRoundedRect(bx, by, 180, 56, 28);
     ctx.fill();
     ctx.shadowBlur = 0;
@@ -521,7 +534,7 @@
     ctx.restore();
   }
 
-  function renderPlaying() {
+  function renderPlaying(now) {
     // White background
     ctx.fillStyle = '#fafaf7';
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
@@ -561,15 +574,11 @@
 
         if (row.clicked) {
           // Clicked -> grey
-          const gVal = 160 + Math.sin(performance.now() * 0.01) * 10;
+          const gVal = 160 + Math.sin(now * 0.01) * 10;
           ctx.fillStyle = `rgb(${gVal},${gVal},${gVal})`;
         } else {
-          // Active black tile
-          const tileGrad = ctx.createLinearGradient(bx, by, bx + bw, by + bh);
-          tileGrad.addColorStop(0, '#1a1a1a');
-          tileGrad.addColorStop(0.6, '#0d0d0d');
-          tileGrad.addColorStop(1, '#1a1a1a');
-          ctx.fillStyle = tileGrad;
+          // Active black tile — use solid color, no per-frame gradient allocation
+          ctx.fillStyle = '#111';
         }
 
         drawRoundedRect(bx, by, bw, bh, 6);
@@ -587,7 +596,7 @@
     // Danger indicator: flash red when black tile near bottom
     for (const row of rows) {
       if (!row.clicked && row.y + ROW_H > CANVAS_H - 30 && row.y < CANVAS_H) {
-        const alpha = Math.abs(Math.sin(performance.now() * 0.015)) * 0.3;
+        const alpha = Math.abs(Math.sin(now * 0.015)) * 0.3;
         ctx.fillStyle = `rgba(255,50,50,${alpha})`;
         ctx.fillRect(row.blackCol * COL_W, row.y, COL_W, ROW_H);
       }
@@ -628,7 +637,7 @@
 
     // Combo display
     if (combo >= 3) {
-      const alpha = Math.min(1, (performance.now() - lastTapTime) / 400);
+      const alpha = Math.min(1, (now - lastTapTime) / 400);
       ctx.globalAlpha = alpha;
       ctx.fillStyle = combo >= 10 ? '#ff4444' : combo >= 6 ? '#f6c90e' : '#48dbfb';
       ctx.font = `bold ${28 + combo * 1.5}px "PingFang SC","Microsoft YaHei",sans-serif`;
@@ -645,9 +654,9 @@
     ctx.fillText('Lv.' + speedLevel, 20, 40);
   }
 
-  function renderOver() {
+  function renderOver(now) {
     // Dark overlay
-    const elapsed = (performance.now() - gameOverTime) / 1000;
+    const elapsed = (now - gameOverTime) / 1000;
     const alpha = Math.min(0.85, elapsed * 2);
     ctx.fillStyle = `rgba(0,0,0,${alpha})`;
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
@@ -710,10 +719,7 @@
     if (elapsed > 1.0) {
       const bx = CANVAS_W / 2 - 90;
       const by = CANVAS_H / 2 + 110;
-      const btnGrad = ctx.createLinearGradient(bx, by, bx, by + 56);
-      btnGrad.addColorStop(0, '#f6c90e');
-      btnGrad.addColorStop(1, '#e0a800');
-      ctx.fillStyle = btnGrad;
+      ctx.fillStyle = '#f6c90e';
       drawRoundedRect(bx, by, 180, 56, 28);
       ctx.fill();
       ctx.fillStyle = '#1a1a2e';
@@ -779,7 +785,7 @@
     }
   }
 
-  function render() {
+  function render(now) {
     ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
 
     // Apply shake
@@ -792,13 +798,13 @@
     }
 
     if (state === 'IDLE') {
-      renderIdle();
+      renderIdle(now);
     } else if (state === 'PLAYING') {
-      renderPlaying();
+      renderPlaying(now);
     } else if (state === 'OVER') {
       // Draw playing state underneath
-      renderPlaying();
-      renderOver();
+      renderPlaying(now);
+      renderOver(now);
     }
 
     if (shakeAmount > 0.1) {
@@ -813,12 +819,13 @@
     lastFrameTime = timestamp;
 
     update(dt);
-    render();
+    render(timestamp);
 
     animFrameId = requestAnimationFrame(gameLoop);
   }
 
   // ==================== INIT ====================
+  buildCachedGradients();
   initRows(); // prepare for preview
   lastFrameTime = performance.now();
   animFrameId = requestAnimationFrame(gameLoop);
