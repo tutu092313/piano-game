@@ -21,7 +21,7 @@
 
 ## 🚀 快速开始
 
-直接用浏览器打开 `piano-game.html` 即可。
+直接用浏览器打开 `index.html` 即可。
 
 或一键部署到 GitHub Pages：
 
